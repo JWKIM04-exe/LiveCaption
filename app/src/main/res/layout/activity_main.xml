@@ -60,6 +60,63 @@
         </RadioGroup>
 
         <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="언어"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/langGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/langKo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="한국어만 (글자가 가장 빨리 나와요)"
+                android:textSize="16sp" />
+
+            <RadioButton
+                android:id="@+id/langMulti"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="한국어 + 영어·일본어 자동 번역"
+                android:textSize="16sp" />
+        </RadioGroup>
+
+        <LinearLayout
+            android:id="@+id/multiBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="12dp">
+
+            <TextView
+                android:id="@+id/modelStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textSize="15sp" />
+
+            <Button
+                android:id="@+id/btnModel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="다국어·번역 모델 받기 (약 260MB, 와이파이 권장)" />
+
+            <CheckBox
+                android:id="@+id/showOrig"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="번역할 때 외국어 원문도 작게 보여주기"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <TextView
             android:id="@+id/fontLabel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

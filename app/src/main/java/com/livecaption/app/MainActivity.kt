@@ -11,7 +11,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.LinearLayout
 import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
@@ -29,6 +32,12 @@ class MainActivity : Activity() {
     private lateinit var fontLabel: TextView
     private lateinit var bgLabel: TextView
     private lateinit var linesLabel: TextView
+    private lateinit var modelStatus: TextView
+    private lateinit var btnModel: Button
+    private lateinit var multiBox: LinearLayout
+
+    @Volatile
+    private var downloading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,6 +61,26 @@ class MainActivity : Activity() {
         sourceGroup.check(if (Prefs.source(prefs) == Prefs.SOURCE_MIC) R.id.srcMic else R.id.srcPhone)
         sourceGroup.setOnCheckedChangeListener { _, id ->
             prefs.edit().putInt(Prefs.SOURCE, if (id == R.id.srcMic) Prefs.SOURCE_MIC else Prefs.SOURCE_PHONE).apply()
+        }
+
+        // 언어 / 번역
+        modelStatus = findViewById(R.id.modelStatus)
+        btnModel = findViewById(R.id.btnModel)
+        multiBox = findViewById(R.id.multiBox)
+        val langGroup = findViewById<RadioGroup>(R.id.langGroup)
+        langGroup.check(if (Prefs.lang(prefs) == Prefs.LANG_MULTI) R.id.langMulti else R.id.langKo)
+        langGroup.setOnCheckedChangeListener { _, id ->
+            prefs.edit().putInt(Prefs.LANG, if (id == R.id.langMulti) Prefs.LANG_MULTI else Prefs.LANG_KO).apply()
+            updateModelUi()
+            if (CaptionService.running) {
+                Toast.makeText(this, "언어 변경은 자막을 껐다가 다시 켜면 적용돼요", Toast.LENGTH_LONG).show()
+            }
+        }
+        btnModel.setOnClickListener { downloadModels() }
+        val showOrig = findViewById<CheckBox>(R.id.showOrig)
+        showOrig.isChecked = Prefs.showOriginal(prefs)
+        showOrig.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(Prefs.SHOW_ORIG, checked).apply()
         }
 
         // 위치
@@ -104,6 +133,39 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         updateStatus()
+        updateModelUi()
+    }
+
+    private fun updateModelUi() {
+        val multi = Prefs.lang(Prefs.get(this)) == Prefs.LANG_MULTI
+        multiBox.visibility = if (multi) View.VISIBLE else View.GONE
+        if (downloading) return
+        val ready = ModelStore.isReady(this)
+        modelStatus.text = if (ready) "✅ 다국어·번역 모델 준비됨" else "⚠️ 처음 한 번 모델을 받아야 해요"
+        btnModel.visibility = if (ready) View.GONE else View.VISIBLE
+        btnModel.isEnabled = true
+    }
+
+    private fun downloadModels() {
+        if (downloading) return
+        downloading = true
+        btnModel.isEnabled = false
+        modelStatus.text = "다운로드 준비 중…"
+        val app = applicationContext
+        Thread {
+            val report: (String) -> Unit = { msg -> runOnUiThread { modelStatus.text = msg } }
+            val ok = ModelStore.download(app, report) && LiveTranslator.prefetchAll(report)
+            runOnUiThread {
+                downloading = false
+                if (ok) {
+                    Toast.makeText(this, "모델 준비 완료! 이제 자막을 시작하세요", Toast.LENGTH_LONG).show()
+                    updateModelUi()
+                } else {
+                    btnModel.isEnabled = true
+                    btnModel.visibility = View.VISIBLE
+                }
+            }
+        }.start()
     }
 
     private fun updateStatus() {
@@ -124,6 +186,11 @@ class MainActivity : Activity() {
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "먼저 '다른 앱 위에 표시'를 허용해 주세요", Toast.LENGTH_LONG).show()
             openOverlaySettings()
+            return
+        }
+        val p = Prefs.get(this)
+        if (Prefs.lang(p) == Prefs.LANG_MULTI && !ModelStore.isReady(this)) {
+            Toast.makeText(this, "번역 모드는 먼저 '다국어·번역 모델 받기'를 눌러 주세요", Toast.LENGTH_LONG).show()
             return
         }
         val needed = mutableListOf(Manifest.permission.RECORD_AUDIO)

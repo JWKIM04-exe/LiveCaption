@@ -14,6 +14,10 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.Icon
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
 import android.hardware.input.InputManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -39,6 +43,14 @@ import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizer
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizerResult
+import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.Vad
+import com.k2fsa.sherpa.onnx.VadModelConfig
 import com.k2fsa.sherpa.onnx.getFeatureConfig
 import kotlin.math.max
 import kotlin.math.min
@@ -64,6 +76,8 @@ class CaptionService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         private const val MAX_LINE_CHARS = 60         // 한 줄이 너무 길면 뒷부분만 보여줌
 
         private const val MODEL_DIR = "sherpa-onnx-streaming-zipformer-korean-2024-06-16"
+        private const val PARTIAL_MS = 500L           // 다국어 모드: 말하는 중 중간 결과 갱신 주기
+        private const val VAD_WINDOW = 512
 
         @Volatile
         var running = false
@@ -154,7 +168,10 @@ class CaptionService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         setCaption("자막 준비 중…")
         prefs.registerOnSharedPreferenceChangeListener(this)
 
-        worker = Thread({ recognitionLoop(source) }, "caption-worker").also { it.start() }
+        val multi = Prefs.lang(prefs) == Prefs.LANG_MULTI && ModelStore.isReady(this)
+        worker = Thread({
+            if (multi) multiLangLoop(source) else recognitionLoop(source)
+        }, "caption-worker").also { it.start() }
         return START_NOT_STICKY
     }
 
@@ -218,7 +235,7 @@ class CaptionService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         )
         val builder = AudioRecord.Builder()
             .setAudioFormat(format)
-            .setBufferSizeInBytes(max(minBuf, SAMPLE_RATE * 2))
+            .setBufferSizeInBytes(max(minBuf, SAMPLE_RATE * 2 * 4))
 
         if (source == Prefs.SOURCE_PHONE) {
             val p = projection ?: throw IllegalStateException("no projection")
@@ -308,6 +325,186 @@ class CaptionService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
+    // ───────────────────── 다국어 모드 (한/영/일 + 번역) ─────────────────────
+
+    private class Line(val main: String, val original: String?)
+
+    private fun decodeOnce(recognizer: OfflineRecognizer, samples: FloatArray): OfflineRecognizerResult {
+        val s = recognizer.createStream()
+        s.acceptWaveform(samples, SAMPLE_RATE)
+        recognizer.decode(s)
+        val r = recognizer.getResult(s)
+        s.release()
+        return r
+    }
+
+    private fun toLine(r: OfflineRecognizerResult, tr: LiveTranslator): Line? {
+        val text = r.text.trim()
+        if (text.isEmpty()) return null
+        val src = tr.sourceFor(r.lang, text) ?: return Line(text, null)
+        val ko = tr.translate(src, text)?.trim()
+        return if (ko.isNullOrEmpty()) Line(text, null) else Line(ko, text)
+    }
+
+    private fun render(lines: List<Line>): CharSequence {
+        val showOrig = Prefs.showOriginal(prefs)
+        val sb = SpannableStringBuilder()
+        lines.forEachIndexed { i, l ->
+            if (i > 0) sb.append("\n")
+            if (showOrig && l.original != null) {
+                val start = sb.length
+                sb.append(tail(l.original)).append("\n")
+                sb.setSpan(RelativeSizeSpan(0.7f), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sb.setSpan(ForegroundColorSpan(Color.rgb(205, 205, 205)), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            sb.append(tail(l.main))
+        }
+        return sb
+    }
+
+    private fun multiLangLoop(source: Int) {
+        var recognizer: OfflineRecognizer? = null
+        var vad: Vad? = null
+        var record: AudioRecord? = null
+        val translator = LiveTranslator()
+        try {
+            setCaption("다국어 모델 불러오는 중…")
+            recognizer = OfflineRecognizer(
+                config = OfflineRecognizerConfig(
+                    featConfig = getFeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+                    modelConfig = OfflineModelConfig(
+                        senseVoice = OfflineSenseVoiceModelConfig(
+                            model = ModelStore.modelFile(this).absolutePath,
+                            language = "",
+                            useInverseTextNormalization = true,
+                        ),
+                        tokens = ModelStore.tokensFile(this).absolutePath,
+                        numThreads = 2,
+                    ),
+                )
+            )
+            vad = Vad(
+                assetManager = assets,
+                config = VadModelConfig(
+                    sileroVadModelConfig = SileroVadModelConfig(
+                        model = "silero_vad.onnx",
+                        threshold = 0.5f,
+                        minSilenceDuration = 0.35f,
+                        minSpeechDuration = 0.25f,
+                        windowSize = VAD_WINDOW,
+                        maxSpeechDuration = 8.0f,
+                    ),
+                    sampleRate = SAMPLE_RATE,
+                    numThreads = 1,
+                ),
+            )
+
+            record = createAudioRecord(source)
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                throw IllegalStateException("AudioRecord init failed")
+            }
+            record.startRecording()
+            setCaption(if (source == Prefs.SOURCE_PHONE) "🎧 듣는 중… (한·영·일 자동)" else "🎤 듣는 중… (한·영·일 자동)")
+            var hint = true
+
+            val buf = ShortArray(SAMPLE_RATE / 10)
+            var audio = FloatArray(SAMPLE_RATE * 20)
+            var len = 0          // 쌓인 샘플 수
+            var offset = 0       // VAD에 넣은 위치
+            var speechStart = -1 // 지금 말하는 구간 시작 (-1 = 조용함)
+            var lastPartialAt = 0L
+
+            val committed = ArrayDeque<Line>()
+            var partial: Line? = null
+            var shownKey = ""
+            var lastChange = SystemClock.elapsedRealtime()
+
+            while (!stopFlag) {
+                val n = record.read(buf, 0, buf.size)
+                if (n < 0) throw IllegalStateException("AudioRecord read error $n")
+                if (n == 0) continue
+
+                if (len + n > audio.size) audio = audio.copyOf(max(audio.size * 2, len + n))
+                for (i in 0 until n) audio[len + i] = buf[i] / 32768.0f
+                len += n
+
+                while (offset + VAD_WINDOW <= len) {
+                    vad.acceptWaveform(audio.copyOfRange(offset, offset + VAD_WINDOW))
+                    offset += VAD_WINDOW
+                    if (speechStart < 0 && vad.isSpeechDetected()) {
+                        speechStart = max(0, offset - SAMPLE_RATE * 4 / 10) // 0.4초 앞부터
+                        lastPartialAt = 0L
+                    }
+                }
+
+                // 문장이 끝났으면 최종 인식 + 번역
+                var segmentDone = false
+                while (!vad.empty()) {
+                    val seg = vad.front()
+                    vad.pop()
+                    toLine(decodeOnce(recognizer, seg.samples), translator)?.let { committed.addLast(it) }
+                    partial = null
+                    segmentDone = true
+                }
+                if (segmentDone) {
+                    speechStart = if (vad.isSpeechDetected()) offset else -1
+                }
+
+                // 말하는 중이면 중간 결과
+                val now = SystemClock.elapsedRealtime()
+                if (!segmentDone && speechStart >= 0 && offset - speechStart > SAMPLE_RATE / 2 &&
+                    now - lastPartialAt > PARTIAL_MS
+                ) {
+                    partial = toLine(decodeOnce(recognizer, audio.copyOfRange(speechStart, offset)), translator)
+                    lastPartialAt = SystemClock.elapsedRealtime()
+                }
+
+                // 조용할 때는 오래된 소리를 버려서 메모리 유지
+                // (말하는 중이면 그 구간 시작 전까지만 버림 — 노래처럼 계속 이어지는 소리에도 안전)
+                val base = if (speechStart >= 0) speechStart else offset - SAMPLE_RATE * 4 / 10
+                if (base > SAMPLE_RATE) {
+                    System.arraycopy(audio, base, audio, 0, len - base)
+                    len -= base
+                    offset -= base
+                    if (speechStart >= 0) speechStart -= base
+                }
+
+                val maxLines = Prefs.lines(prefs)
+                while (committed.size > maxLines) committed.removeFirst()
+                val lines = ArrayList<Line>(committed)
+                partial?.let { lines.add(it) }
+                while (lines.size > maxLines) lines.removeAt(0)
+
+                val key = lines.joinToString("|") { it.main + "/" + it.original } + Prefs.showOriginal(prefs)
+                val t = SystemClock.elapsedRealtime()
+                if (lines.isNotEmpty() && key != shownKey) {
+                    shownKey = key
+                    lastChange = t
+                    hint = false
+                    setCaption(render(lines))
+                } else if (!hint && shownKey.isNotEmpty() && lines.isNotEmpty() && t - lastChange > CLEAR_AFTER_MS && speechStart < 0) {
+                    committed.clear()
+                    partial = null
+                    shownKey = ""
+                    setCaption("")
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "multilang error", e)
+            setCaption("⚠️ 오류: ${e.message ?: e.javaClass.simpleName}")
+            main.postDelayed({ stopSelf() }, 4000)
+        } finally {
+            try {
+                record?.stop()
+            } catch (_: Exception) {
+            }
+            record?.release()
+            vad?.release()
+            recognizer?.release()
+            translator.close()
+        }
+    }
+
     private fun tail(s: String): String =
         if (s.length <= MAX_LINE_CHARS) s else "…" + s.substring(s.length - MAX_LINE_CHARS)
 
@@ -366,7 +563,7 @@ class CaptionService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         lp.y = if (Prefs.pos(prefs) == 1) 0 else dp(48)
     }
 
-    private fun setCaption(text: String) {
+    private fun setCaption(text: CharSequence) {
         main.post {
             val tv = overlay ?: return@post
             tv.text = text

@@ -11,8 +11,8 @@ android {
         applicationId = "com.livecaption.app"
         minSdk = 29          // 안드로이드 10 이상 (다른 앱 소리 캡처가 가능한 최소 버전)
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -60,4 +60,6 @@ android {
 dependencies {
     // sherpa-onnx (폰 안에서 돌아가는 음성인식 엔진). GitHub Actions가 빌드 전에 받아서 app/libs 에 넣습니다.
     implementation(files("libs/sherpa-onnx.aar"))
+    // 폰 안에서 동작하는 번역 (영어·일본어·중국어 → 한국어)
+    implementation("com.google.mlkit:translate:17.0.3")
 }

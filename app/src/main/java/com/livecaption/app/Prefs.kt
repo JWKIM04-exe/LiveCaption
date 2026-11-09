@@ -12,6 +12,12 @@ object Prefs {
     const val BG = "bg"             // 배경 진하기 0..100
     const val LINES = "lines"       // 보여줄 줄 수 1..4
 
+    const val LANG = "lang"         // 0 = 한국어만, 1 = 한/영/일 자동 + 번역
+    const val SHOW_ORIG = "show_orig" // 번역할 때 외국어 원문도 표시
+
+    const val LANG_KO = 0
+    const val LANG_MULTI = 1
+
     const val SOURCE_PHONE = 0
     const val SOURCE_MIC = 1
 
@@ -22,4 +28,6 @@ object Prefs {
     fun pos(p: SharedPreferences) = p.getInt(POS, 2)
     fun bg(p: SharedPreferences) = p.getInt(BG, 55)
     fun lines(p: SharedPreferences) = p.getInt(LINES, 2)
+    fun lang(p: SharedPreferences) = p.getInt(LANG, LANG_KO)
+    fun showOriginal(p: SharedPreferences) = p.getBoolean(SHOW_ORIG, true)
 }

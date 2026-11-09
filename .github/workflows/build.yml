@@ -58,6 +58,33 @@ jobs:
           mv "$MODEL" app/src/main/assets/
           ls -lh "app/src/main/assets/$MODEL"
 
+      - name: Download voice-activity model (small, bundled in APK)
+        run: |
+          curl -fL --retry 3 -o app/src/main/assets/silero_vad.onnx \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+          ls -lh app/src/main/assets/silero_vad.onnx
+
+      - name: Publish multilingual model for in-app download (only once)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SV: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
+        run: |
+          if gh release view models -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "models release already exists"; exit 0
+          fi
+          curl -fL --retry 3 -o sv.tar.bz2 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${SV}.tar.bz2"
+          tar xf sv.tar.bz2
+          mkdir -p sv-out
+          cp "$SV/model.int8.onnx" sv-out/sense-voice.int8.onnx
+          cp "$SV/tokens.txt" sv-out/sense-voice-tokens.txt
+          ls -lh sv-out
+          gh release create models -R "$GITHUB_REPOSITORY" \
+            --title "다국어 모델 (앱이 자동으로 받음)" \
+            --notes "실시간 자막 앱이 번역 모드에서 자동으로 내려받는 파일입니다. 직접 받을 필요 없어요." \
+            --latest=false \
+            sv-out/sense-voice.int8.onnx sv-out/sense-voice-tokens.txt
+
       - name: Build
         run: gradle :app:assembleRelease --no-daemon --stacktrace
 
