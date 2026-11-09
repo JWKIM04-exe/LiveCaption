@@ -1,0 +1,82 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SHERPA_VERSION: "2.0.1"
+      MODEL: sherpa-onnx-streaming-zipformer-korean-2024-06-16
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Download sherpa-onnx AAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p app/libs
+          url="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/sherpa-onnx-${SHERPA_VERSION}.aar"
+          if ! curl -fL --retry 3 -o app/libs/sherpa-onnx.aar "$url"; then
+            echo "Pinned version not found, looking up the newest release with an AAR"
+            for tag in $(gh api repos/k2-fsa/sherpa-onnx/releases --paginate -q '.[].tag_name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -10); do
+              v="${tag#v}"
+              if curl -fL --retry 2 -o app/libs/sherpa-onnx.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/${tag}/sherpa-onnx-${v}.aar"; then
+                echo "Using sherpa-onnx $v"; break
+              fi
+            done
+          fi
+          test -s app/libs/sherpa-onnx.aar
+          ls -lh app/libs
+
+      - name: Download Korean speech model
+        run: |
+          curl -fL --retry 3 -o model.tar.bz2 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${MODEL}.tar.bz2"
+          tar xf model.tar.bz2
+          cd "$MODEL"
+          rm -fv decoder-epoch-99-avg-1.int8.onnx encoder-epoch-99-avg-1.onnx joiner-epoch-99-avg-1.onnx
+          rm -fv bpe.model README.md .gitattributes
+          rm -rf test_wavs
+          cd ..
+          mkdir -p app/src/main/assets
+          mv "$MODEL" app/src/main/assets/
+          ls -lh "app/src/main/assets/$MODEL"
+
+      - name: Build
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/LiveCaption.apk
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiveCaption-apk
+          path: out/LiveCaption.apk
+
+      - name: Publish to Releases (easy download from phone)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 실시간 자막 v${{ github.run_number }}
+          body: 폰에서 LiveCaption.apk 를 눌러 다운로드한 뒤 설치하세요.
+          files: out/LiveCaption.apk
+          make_latest: true
